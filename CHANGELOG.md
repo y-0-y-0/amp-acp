@@ -6,6 +6,10 @@
 
 - Answer each `session/prompt` with the turn's token usage (`PromptResponse.usage`), counted from the `usage` Amp reports on each model response. A response streamed as several messages that share an id is counted once. ACP marks the field experimental, and clients that do not read it are unaffected.
 
+### Fixed
+
+- Deliver prompt images to the local CLI as ordered JSONL content instead of silently discarding them. Validate base64, supported MIME types and magic bytes before execution; reject unsupported Orb/SDK image turns explicitly. Keep text-only input unchanged.
+
 ## 0.10.0 - 2026-08-27
 
 ### Added

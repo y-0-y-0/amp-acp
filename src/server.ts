@@ -43,6 +43,7 @@ import {
 import { discoverPluginModes as discoverPluginModesFromDir, type PluginAgentMode } from './plugin-modes.js';
 import { TurnUsage } from './turn-usage.js';
 import { toAcpNotifications } from './to-acp.js';
+import { toAmpPrompt } from './to-amp.js';
 import { exportThreadHistory, exportThreadMessages, historyToNotifications, type ThreadHistoryExporter } from './thread-history.js';
 import path from 'node:path';
 import packageJson from '../package.json';
@@ -465,40 +466,15 @@ export class AmpAcpAgent implements Agent {
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const s = this.sessions.get(params.sessionId);
     if (!s) throw new Error('Session not found');
+    const parts = toAmpPrompt(params.prompt);
+    const hasImages = parts.some((part) => part.type === 'image');
+    const transport = s.executor === 'orb' ? this.orbTransport : this.transport;
+    if (hasImages && (s.executor === 'orb' || transport.name === 'sdk')) {
+      throw RequestError.invalidParams(undefined, 'Images are not supported in Orb/SDK execution');
+    }
+    const prompt = hasImages ? parts : parts.map((part) => part.type === 'text' ? part.text : '').join('');
     s.cancelled = false;
     s.active = true;
-
-    let textInput = '';
-    for (const chunk of params.prompt) {
-      switch (chunk.type) {
-        case 'text':
-          if (chunk.text.trim() === '/init') {
-            textInput += `Please analyze this codebase and create an AGENTS.md file containing:
-1. Build/lint/test commands - especially for running a single test
-2. Architecture and codebase structure information, including important subprojects, internal APIs, databases, etc.
-3. Code style guidelines, including imports, conventions, formatting, types, naming conventions, error handling, etc.
-
-The file you create will be given to agentic coding tools (such as yourself) that operate in this repository. Make it about 20 lines long.
-
-If there are Cursor rules (in .cursor/rules/ or .cursorrules), Claude rules (CLAUDE.md), Windsurf rules (.windsurfrules), Cline rules (.clinerules), Goose rules (.goosehints), or Copilot rules (in .github/copilot-instructions.md), make sure to include them. Also, first check if there is an existing AGENTS.md or AGENT.md file, and if so, update it instead of overwriting it.`;
-          } else {
-            textInput += chunk.text;
-          }
-          break;
-        case 'resource_link':
-          textInput += `\n${chunk.uri}\n`;
-          break;
-        case 'resource':
-          if ('text' in chunk.resource) {
-            textInput += `\n<context ref="${chunk.resource.uri}">\n${chunk.resource.text}\n</context>\n`;
-          }
-          break;
-        case 'image':
-          break;
-        default:
-          break;
-      }
-    }
 
     const options: AmpExecutionOptions = {
       cwd: s.cwd,
@@ -532,8 +508,7 @@ If there are Cursor rules (in .cursor/rules/ or .cursorrules), Claude rules (CLA
     const turnUsage = new TurnUsage();
 
     try {
-      const transport = s.executor === 'orb' ? this.orbTransport : this.transport;
-      for await (const message of transport.execute({ prompt: textInput, options, signal: controller.signal })) {
+      for await (const message of transport.execute({ prompt, options, signal: controller.signal })) {
         turnUsage.add(message);
         if (message.session_id) {
           if (!isAmpThreadId(message.session_id)) {

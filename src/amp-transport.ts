@@ -1,6 +1,8 @@
 import { execute, type AmpOptions } from '@ampcode/sdk';
+import { RequestError } from '@agentclientprotocol/sdk';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import type { AmpPromptPart } from './to-amp.js';
 
 export type AmpMcpServerConfig =
   | {
@@ -51,7 +53,7 @@ export interface AmpStreamMessage {
 }
 
 export interface AmpExecutionRequest {
-  prompt: string;
+  prompt: string | AmpPromptPart[];
   options: AmpExecutionOptions;
   signal: AbortSignal;
 }
@@ -120,8 +122,12 @@ export async function setAmpThreadArchived(
 const sdkTransport: AmpTransport = {
   name: 'sdk',
   execute(request) {
+    if (Array.isArray(request.prompt) && request.prompt.some((part) => part.type === 'image')) {
+      throw RequestError.invalidParams(undefined, 'Images are not supported in Orb/SDK execution');
+    }
     return execute({
-      prompt: request.prompt,
+      prompt: typeof request.prompt === 'string' ? request.prompt
+        : request.prompt.map((part) => part.type === 'text' ? part.text : '').join(''),
       options: buildAmpSdkOptions(request.options),
       signal: request.signal,
     });
@@ -167,8 +173,14 @@ export function createCliTransport(
     name: 'cli',
     async *execute({ prompt, options, signal }) {
       signal.throwIfAborted();
+      const hasImages = Array.isArray(prompt) && prompt.some((part) => part.type === 'image');
+      const args = buildAmpCliArgs(options);
+      if (hasImages) args.push('--stream-json-input');
+      const input = hasImages
+        ? `${JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } })}\n`
+        : typeof prompt === 'string' ? prompt : prompt.map((part) => part.type === 'text' ? part.text : '').join('');
 
-      const child = spawn(command, [...commandArgs, ...buildAmpCliArgs(options)], {
+      const child = spawn(command, [...commandArgs, ...args], {
         cwd: options.cwd,
         env: { ...process.env, ...options.env },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -184,7 +196,7 @@ export function createCliTransport(
       signal.addEventListener('abort', abort, { once: true });
 
       child.stdin.on('error', () => {});
-      child.stdin.end(prompt);
+      child.stdin.end(input);
 
       try {
         const lines = createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY });

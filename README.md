@@ -86,7 +86,8 @@ Run `amp login` before starting amp-acp. The adapter and CLI share the same Amp 
 ## Features
 
 - **Streaming responses** — Amp messages, tool calls, and thinking are streamed in real-time via ACP
-- **Image support** — Handles image content blocks from Amp (base64 and URL)
+- **Input images** — Local CLI prompts deliver ordered text and base64 JPEG, PNG, GIF, or WebP images; invalid images fail before Amp starts
+- **Output images** — Converts image content blocks from Amp to ACP (base64 and URL)
 - **MCP passthrough** — MCP servers configured in Zed are automatically passed through to Amp
 - **Session configuration** — Choose local or Orb execution, configure permissions (*Default* or *Bypass*), and select the current Amp mode via ACP config options: the built-in `low`, `medium`, `high`, and `ultra` modes, plus any agent modes registered by Amp plugins (project, system, personal, or workspace — such as `grok45` from the Workspace `official-modes` plugin)
 - **`/init` command** — Type `/init` to generate an `AGENTS.md` file for your project
@@ -133,6 +134,10 @@ During `session/load`, prior messages are replayed to the client as `session/upd
 ### Amp execution transport
 
 By default, amp-acp executes the installed Amp CLI directly through its streaming JSON interface. Set `AMP_ACP_TRANSPORT=sdk` to use `@ampcode/sdk` as a compatibility fallback; both transports support the current `low`, `medium`, `high`, and `ultra` Amp modes, plus any plugin agent modes (see below).
+
+Image prompts use one JSONL user message with `--stream-json-input`, including when continuing an exact thread. Text-only prompts keep the existing plain stdin path. Image MIME types must match decoded magic bytes; `image/jpg` is normalized to `image/jpeg`. Only `file://` image URIs are forwarded as `source_path`; HTTP URIs are not used as image sources. SVG, HEIC, BMP, malformed base64 and MIME mismatches are rejected with ACP `invalidParams`, without partial prompt delivery.
+
+The pinned Amp SDK (also the latest published version checked for this change) supports text input only. **Images are not supported in Orb execution or with `AMP_ACP_TRANSPORT=sdk`**: the entire turn fails explicitly before execution. ACP advertises image support globally, not per session, so clients must select local CLI execution for image prompts. Fake-CLI tests verify the actual stdin payload and thread continuation; real Amp image inference and the Zed image UI have not been verified for this change.
 
 ### Plugin agent modes
 
