@@ -45,6 +45,7 @@ import { TurnUsage } from './turn-usage.js';
 import { toAcpNotifications } from './to-acp.js';
 import { toAmpPrompt } from './to-amp.js';
 import { exportThreadHistory, exportThreadMessages, historyToNotifications, type ThreadHistoryExporter } from './thread-history.js';
+import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import packageJson from '../package.json';
 
@@ -259,7 +260,9 @@ export class AmpAcpAgent implements Agent {
 
   async initialize(request: InitializeRequest): Promise<InitializeResponseWithAgentInfo> {
     this.clientCapabilities = request.clientCapabilities;
-    console.info(`[acp] amp-acp v${PACKAGE_VERSION} initialized`);
+    console.error(`[acp] amp-acp v${PACKAGE_VERSION} initialized`);
+    const terminalAuth = getTerminalAuthCommand(process.argv[1], process.execPath);
+    if (!terminalAuth) console.error('[acp] terminal-auth fallback omitted: no existing non-virtual agent invocation');
     return {
       protocolVersion: 1,
       agentInfo: {
@@ -287,13 +290,13 @@ export class AmpAcpAgent implements Agent {
           id: 'setup',
           name: 'Amp API Key Setup',
           description: 'Run interactive setup to configure your Amp API key',
-          _meta: {
+          ...(request.clientCapabilities?.auth?.terminal ? { type: 'terminal' as const, args: ['--setup'] } : {}),
+          ...(terminalAuth ? { _meta: {
             'terminal-auth': {
-              command: getTerminalAuthCommand(),
-              args: ['--setup'],
+              ...terminalAuth,
               label: 'Amp API Key Setup',
             },
-          },
+          } } : {}),
         },
       ],
     };
@@ -711,12 +714,24 @@ export function isAuthError(message: string): boolean {
 }
 
 export function getTerminalAuthCommand(
-  argv1: string | undefined = process.argv[1],
-  execPath: string = process.execPath,
-): string {
-  const resolvedArgv1 = argv1 ? path.resolve(argv1) : '';
-  if (!resolvedArgv1 || resolvedArgv1.startsWith('/$bunfs/')) {
-    return execPath;
+  argv1: string | undefined,
+  execPath: string,
+): { command: string; args: string[] } | undefined {
+  const isVirtual = (value: string) => /^\/\$bunfs\//i.test(value) || /(?:~|%7e)BUN(?:[\\/]|%5c|%2f)/i.test(value);
+  const candidate = !argv1 || isVirtual(argv1) ? execPath : argv1;
+  if (isVirtual(candidate)) return undefined;
+  const command = path.resolve(candidate);
+  if (!existsSync(command)) return undefined;
+  // npx can launch a symlink with no extension; inspect the real script too.
+  let script: string;
+  try {
+    script = realpathSync(command);
+  } catch {
+    return undefined;
   }
-  return resolvedArgv1;
+  if (/\.(?:js|mjs|cjs)$/i.test(script)) {
+    if (isVirtual(execPath) || !existsSync(execPath)) return undefined;
+    return { command: path.resolve(execPath), args: [script, '--setup'] };
+  }
+  return { command, args: ['--setup'] };
 }

@@ -81,6 +81,10 @@ Requires Node.js 18+.
 
 Run `amp login` before starting amp-acp. The adapter and CLI share the same Amp credentials. For headless environments, `AMP_API_KEY` is also supported. `amp-acp --setup` remains available as an interactive API-key setup fallback.
 
+For clients that advertise `clientCapabilities.auth.terminal`, the **Amp API Key Setup** method uses ACP's standard terminal authentication: the client reruns its configured agent invocation with `--setup` appended. This avoids storing an installation path in the button. Older clients receive the compatibility `_meta["terminal-auth"]` command only when it exists on disk and is not a virtual Bun path. JavaScript entry points (including npx symlinks) run through `process.execPath` with the script path and `--setup`; an unresolved fallback is omitted and logged to stderr. `authenticate` remains tolerant of legacy callers, but standard terminal methods must not be passed to it by clients.
+
+Linux protocol tests cover compiled, Node and npx launch resolution. The setup button itself has not been exercised in Zed or on Windows for this change; virtual Windows Bun paths are covered by synthetic tests. No API keys are logged, and the interactive `--setup` flow is unchanged.
+
 ![Auth Process](img/auth-process.png)
 
 ## Features

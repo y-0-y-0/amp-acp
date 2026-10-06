@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const BINARY_PATH = path.resolve(__dirname, '../dist/amp-acp-test');
@@ -123,7 +124,21 @@ describe('Binary integration tests', () => {
     expect(command).toBeDefined();
     expect(path.isAbsolute(command!)).toBe(true);
     expect(command!.startsWith('/$bunfs/')).toBe(false);
+    expect(existsSync(command!)).toBe(true);
+    expect(command).toBe(BINARY_PATH);
     expect(label).toBe('Amp API Key Setup');
+  });
+
+  it('advertises terminal auth with the configured invocation arguments', async () => {
+    const resp = await sendAndWait('initialize', {
+      protocolVersion: 1, clientCapabilities: { auth: { terminal: true } },
+    });
+    expect(resp.result!.authMethods).toEqual([{
+      id: 'setup', name: 'Amp API Key Setup',
+      description: 'Run interactive setup to configure your Amp API key',
+      type: 'terminal', args: ['--setup'],
+      _meta: { 'terminal-auth': { command: BINARY_PATH, args: ['--setup'], label: 'Amp API Key Setup' } },
+    }]);
   });
 
   it('session/new returns sessionId and config options', async () => {
@@ -217,7 +232,7 @@ describe('Binary integration tests', () => {
 
   it('authenticate returns error with code -32000', async () => {
     const resp = await sendAndWait('authenticate', {
-      methodId: 'oauth',
+      methodId: 'setup',
     });
 
     expect(resp.error).toBeDefined();

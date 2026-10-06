@@ -9,6 +9,7 @@
 ### Fixed
 
 - Deliver prompt images to the local CLI as ordered JSONL content instead of silently discarding them. Validate base64, supported MIME types and magic bytes before execution; reject unsupported Orb/SDK image turns explicitly. Keep text-only input unchanged.
+- Advertise standard terminal authentication only to clients that enable it. Keep validated legacy setup metadata, run JS/npx scripts through their interpreter, and omit nonexistent or virtual Bun commands instead of advertising a broken setup path.
 
 ## 0.10.0 - 2026-08-27
 
