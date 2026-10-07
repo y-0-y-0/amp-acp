@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const BINARY_PATH = path.resolve(__dirname, '../dist/amp-acp-test');
@@ -140,6 +141,44 @@ describe('Binary integration tests', () => {
       type: 'terminal', args: ['--setup'],
       _meta: { 'terminal-auth': { command: BINARY_PATH, args: ['--setup'], label: 'Amp API Key Setup' } },
     }]);
+  });
+
+  it('reaches setup through compiled and Node compatibility launchers without entering a key', () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), 'amp-acp-setup-'));
+    const env: NodeJS.ProcessEnv = {
+      ...process.env, HOME: home, USERPROFILE: home, APPDATA: home,
+      XDG_CONFIG_HOME: home, AMP_ACP_DISABLE_PLUGIN_LIST: '1',
+    };
+    delete env.AMP_API_KEY;
+    try {
+      for (const launch of [
+        { command: BINARY_PATH, args: [] },
+        { command: 'node', args: [path.resolve(__dirname, '../dist/index.js')] },
+      ]) {
+        const initialized = spawnSync(launch.command, launch.args, {
+          env, encoding: 'utf8', timeout: 2000,
+          input: `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } })}\n`,
+        });
+        expect(initialized.error).toBeUndefined();
+        const response = JSON.parse(initialized.stdout.trim()) as JsonRpcMessage;
+        const methods = response.result!.authMethods as Array<{
+          _meta: { 'terminal-auth': { command: string; args: string[] } };
+        }>;
+        const launcher = methods[0]._meta['terminal-auth'];
+        expect(existsSync(launcher.command)).toBe(true);
+        const setup = spawnSync(launcher.command, launcher.args, {
+          env, input: '\n', encoding: 'utf8', timeout: 2000,
+        });
+        expect(setup.error).toBeUndefined();
+        expect(setup.status).toBe(1);
+        expect(setup.stdout).toBe('');
+        expect(setup.stderr).toContain('Paste your AMP API key:');
+        expect(setup.stderr).toContain('No API key provided. Aborting.');
+        expect(existsSync(path.join(home, 'amp-acp', 'credentials.json'))).toBe(false);
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('session/new returns sessionId and config options', async () => {

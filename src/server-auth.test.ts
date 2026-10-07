@@ -26,7 +26,7 @@ describe('getTerminalAuthCommand', () => {
   });
 
   it('uses execPath when argv1 is bunfs virtual path', () => {
-    expect(getTerminalAuthCommand('/$bunfs/root/amp-acp', process.execPath)).toEqual({
+    expect(getTerminalAuthCommand('/$bunfs/root/amp-acp', process.execPath, true)).toEqual({
       command: process.execPath, args: ['--setup'],
     });
   });
@@ -50,15 +50,29 @@ describe('getTerminalAuthCommand', () => {
     expect(getTerminalAuthCommand(shim, process.execPath)).toEqual({ command: process.execPath, args: [script, '--setup'] });
   });
 
-  it('handles absent argv1 and a compiled executable', () => {
-    expect(getTerminalAuthCommand(undefined, process.execPath)).toEqual({ command: process.execPath, args: ['--setup'] });
-    const binary = process.execPath;
-    expect(getTerminalAuthCommand(binary, process.execPath)).toEqual({ command: binary, args: ['--setup'] });
+  it('omits runtime-only launches unless standalone mode is established', () => {
+    expect(getTerminalAuthCommand(undefined, process.execPath)).toBeUndefined();
+    expect(getTerminalAuthCommand(process.execPath, process.execPath)).toBeUndefined();
+    expect(getTerminalAuthCommand(undefined, process.execPath, true)).toEqual({ command: process.execPath, args: ['--setup'] });
+  });
+
+  it('never treats simulated virtual argv paths as proof that a bare runtime is an agent binary', () => {
+    for (const argv1 of ['/$bunfs/root/agent.js', '/%24bunfs/root/agent.js', 'B:/~BUN/root/agent.js']) {
+      expect(getTerminalAuthCommand(argv1, process.execPath)).toBeUndefined();
+    }
+  });
+
+  it('rejects directories as agent launchers and script runtimes', async () => {
+    const script = path.join(dir, 'agent.js');
+    await writeFile(script, '');
+    expect(getTerminalAuthCommand(dir, process.execPath)).toBeUndefined();
+    expect(getTerminalAuthCommand(script, dir)).toBeUndefined();
   });
 
   it('rejects virtual Windows Bun argv paths before resolving them on the host', () => {
     for (const argv1 of ['B:\\~BUN\\root\\amp-acp.exe', 'B:/~BUN/root/amp-acp.exe', 'B:/%7EBUN/root/amp-acp.exe', 'B:%5C%7EBUN%5Croot%5Camp-acp.exe']) {
-      expect(getTerminalAuthCommand(argv1, process.execPath)).toEqual({ command: process.execPath, args: ['--setup'] });
+      expect(getTerminalAuthCommand(argv1, process.execPath)).toBeUndefined();
+      expect(getTerminalAuthCommand(argv1, process.execPath, true)).toEqual({ command: process.execPath, args: ['--setup'] });
     }
   });
 

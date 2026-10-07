@@ -47,7 +47,7 @@ import { TurnUsage } from './turn-usage.js';
 import { toAcpNotifications } from './to-acp.js';
 import { toAmpPrompt } from './to-amp.js';
 import { exportThreadHistory, exportThreadMessages, historyToNotifications, type ThreadHistoryExporter } from './thread-history.js';
-import { existsSync, realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import packageJson from '../package.json';
 
@@ -779,22 +779,28 @@ export function isAuthError(message: string): boolean {
 export function getTerminalAuthCommand(
   argv1: string | undefined,
   execPath: string,
+  standalone = typeof Bun !== 'undefined' && Bun.isStandaloneExecutable === true,
 ): { command: string; args: string[] } | undefined {
-  const isVirtual = (value: string) => /^\/\$bunfs\//i.test(value) || /(?:~|%7e)BUN(?:[\\/]|%5c|%2f)/i.test(value);
-  const candidate = !argv1 || isVirtual(argv1) ? execPath : argv1;
-  if (isVirtual(candidate)) return undefined;
-  const command = path.resolve(candidate);
-  if (!existsSync(command)) return undefined;
-  // npx can launch a symlink with no extension; inspect the real script too.
-  let script: string;
+  const isVirtual = (value: string) => {
+    try {
+      value = decodeURIComponent(value);
+    } catch {
+      // Existing filenames may contain literal, non-encoded percent signs.
+    }
+    return /^(?:\/\$bunfs\/|[a-z]:\/~BUN\/)/i.test(value.replaceAll('\\', '/'));
+  };
+  const candidate = standalone ? execPath : argv1;
+  if (!candidate || isVirtual(candidate)) return undefined;
   try {
-    script = realpathSync(command);
+    // npx can launch an extensionless symlink; validate the actual file too.
+    const script = realpathSync(path.resolve(candidate));
+    if (isVirtual(script) || !statSync(script).isFile()) return undefined;
+    if (standalone) return { command: script, args: ['--setup'] };
+    if (!/\.(?:js|mjs|cjs)$/i.test(script) || isVirtual(execPath)) return undefined;
+    const runtime = realpathSync(path.resolve(execPath));
+    if (isVirtual(runtime) || !statSync(runtime).isFile()) return undefined;
+    return { command: runtime, args: [script, '--setup'] };
   } catch {
     return undefined;
   }
-  if (/\.(?:js|mjs|cjs)$/i.test(script)) {
-    if (isVirtual(execPath) || !existsSync(execPath)) return undefined;
-    return { command: path.resolve(execPath), args: [script, '--setup'] };
-  }
-  return { command, args: ['--setup'] };
 }
