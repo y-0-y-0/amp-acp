@@ -354,7 +354,7 @@ export class AmpAcpAgent implements Agent {
   }
 
   async listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
-    if (params.cwd != null && !path.isAbsolute(params.cwd)) {
+    if (params.cwd != null && (!path.isAbsolute(params.cwd) || params.cwd.includes('\0'))) {
       throw RequestError.invalidParams(undefined, 'Session list cwd must be an absolute path');
     }
     const cwd = params.cwd != null ? path.resolve(params.cwd) : null;
@@ -377,7 +377,7 @@ export class AmpAcpAgent implements Agent {
       }
     }
     const sessions = (await this.threadStore.list()).flatMap((mapping) => {
-      if (!mapping.cwd || !mapping.updatedAt) return [];
+      if (!mapping.cwd || !path.isAbsolute(mapping.cwd) || mapping.cwd.includes('\0') || !mapping.updatedAt) return [];
       const sessionCwd = path.resolve(mapping.cwd);
       if (cwd && sessionCwd !== cwd) return [];
       return [{ sessionId: mapping.sessionId, cwd: sessionCwd, updatedAt: mapping.updatedAt }];
@@ -558,6 +558,7 @@ export class AmpAcpAgent implements Agent {
     s.controller = controller;
     const turnUsage = new TurnUsage();
     let failed = false;
+    let succeeded = false;
 
     try {
       // A retry after an initial mapping write failure must not bypass
@@ -589,6 +590,9 @@ export class AmpAcpAgent implements Agent {
           }
         }
 
+        if (message.type === 'result') {
+          succeeded = message.subtype === 'success' && message.is_error === false;
+        }
         if (message.type === 'result' && message.is_error) {
           failed = true;
           if (typeof message.error === 'string' && isAuthError(message.error)) {
@@ -602,7 +606,11 @@ export class AmpAcpAgent implements Agent {
         }
       }
 
-      if (!s.cancelled && !failed) {
+      const stopReason = s.cancelled ? 'cancelled' : 'end_turn';
+      // Execution is over; cancellation during bookkeeping must not change
+      // the outcome after a successful activity write has already begun.
+      s.controller = null;
+      if (succeeded && stopReason === 'end_turn' && !failed) {
         try {
           await this.persistSession(params.sessionId, s);
         } catch (error) {
@@ -613,7 +621,7 @@ export class AmpAcpAgent implements Agent {
         }
       }
       const usage = turnUsage.toAcp();
-      return { stopReason: s.cancelled ? 'cancelled' : 'end_turn', ...(usage ? { usage } : {}) };
+      return { stopReason, ...(usage ? { usage } : {}) };
     } catch (err) {
       if (s.cancelled || (err instanceof Error && (err.name === 'AbortError' || err.message.includes('aborted')))) {
         return { stopReason: 'cancelled' };

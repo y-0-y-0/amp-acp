@@ -11,7 +11,7 @@
 
 - Deliver prompt images to the local CLI as ordered JSONL content instead of silently discarding them. Validate base64, supported MIME types and magic bytes before execution; reject unsupported Orb/SDK image turns explicitly. Keep text-only input unchanged.
 - Advertise standard terminal authentication only to clients that enable it. Keep validated legacy setup metadata, run JS/npx scripts through their interpreter, and omit nonexistent or virtual Bun commands instead of advertising a broken setup path. Require confirmed standalone mode for a scriptless executable fallback; never advertise a bare Node/Bun runtime or directory as the setup launcher.
-- Persist session activity at successful turn completion and refresh connection MCP configuration on `session/load`, including already-loaded sessions. Preserve exact-thread load/resume and best-effort protocol history replay.
+- Persist end-of-turn activity only for explicit successful Amp results without cancellation, not iterator exhaustion. Validate calendar dates and omit unusable stored working directories from session discovery. Refresh connection MCP configuration on `session/load` and `session/resume`, including already-loaded sessions. Preserve exact-thread load/resume and best-effort protocol history replay.
 
 ## 0.10.0 - 2026-08-27
 

@@ -8,6 +8,7 @@ import { AmpAcpAgent } from './server.js';
 import { FileThreadMappingStore } from './thread-mapping-store.js';
 
 const threadId = 'T-01a03c00-e608-7007-8181-5c1cc56757be';
+const differentThreadId = 'T-11a03c00-e608-7007-8181-5c1cc56757be';
 
 const client = {
   sessionUpdate: async () => {},
@@ -100,6 +101,58 @@ describe('Amp ACP thread lifecycle extension', () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]?.options.continue).toBe(threadId);
+  });
+
+  it('preserves the durable thread mapping after transport errors and thread-ID changes', async () => {
+    const cases = [
+      { name: 'transport error', fail: true },
+      { name: 'different returned T-ID', fail: false },
+    ];
+
+    for (const scenario of cases) {
+      const store = new FileThreadMappingStore(stateDir);
+      const requestedThreads: Array<string | boolean | undefined> = [];
+      let execution = 0;
+      const transport: AmpTransport = {
+        name: 'cli',
+        execute(request) {
+          requestedThreads.push(request.options.continue);
+          execution += 1;
+          return (async function* () {
+            if (execution === 1) {
+              yield { type: 'system', subtype: 'init', session_id: threadId };
+              yield { type: 'result', subtype: 'success', is_error: false };
+              return;
+            }
+            if (execution === 2 && scenario.fail) throw new Error('temporary transport failure');
+            yield {
+              type: 'system',
+              subtype: 'init',
+              session_id: execution === 2 ? differentThreadId : threadId,
+            };
+            yield { type: 'result', subtype: 'success', is_error: false };
+          })();
+        },
+      };
+      const agent = new AmpAcpAgent(client, transport, {
+        threadStore: store,
+        discoverPluginModes: () => [],
+      });
+      await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+      const session = await agent.newSession({ cwd: '/tmp/project', mcpServers: [] });
+      const { sessionId } = session;
+      await agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'initial' }] });
+
+      await expect(agent.prompt({
+        sessionId,
+        prompt: [{ type: 'text', text: `failed ${scenario.name}` }],
+      })).rejects.toThrow(scenario.fail ? 'temporary transport failure' : 'Amp changed thread ID');
+      expect((await store.load(sessionId))?.threadId).toBe(threadId);
+
+      await agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'valid retry' }] });
+      expect(requestedThreads).toEqual([undefined, threadId, threadId]);
+      expect((await store.load(sessionId))?.threadId).toBe(threadId);
+    }
   });
 
   it('archives and unarchives only when both IDs match the persisted mapping', async () => {

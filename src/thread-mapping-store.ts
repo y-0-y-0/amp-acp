@@ -60,7 +60,8 @@ function validateMapping(value: unknown, expectedSessionId: string): AmpThreadMa
   if (mapping.updatedAt !== undefined) {
     if (typeof mapping.updatedAt !== 'string'
       || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(mapping.updatedAt)
-      || !Number.isFinite(Date.parse(mapping.updatedAt))) {
+      || !Number.isFinite(Date.parse(mapping.updatedAt))
+      || new Date(`${mapping.updatedAt.slice(0, 10)}T00:00:00Z`).toISOString().slice(0, 10) !== mapping.updatedAt.slice(0, 10)) {
       throw new Error(`Invalid persisted mapping for ACP session ${expectedSessionId}`);
     }
     result.updatedAt = new Date(mapping.updatedAt).toISOString();
@@ -122,7 +123,10 @@ export class FileThreadMappingStore implements ThreadMappingStore {
         if (!mapping) continue;
         const updatedAt = mapping.updatedAt ?? (await stat(this.mappingPath(sessionId))).mtime.toISOString();
         mappings.push({ ...mapping, updatedAt });
-      } catch {
+      } catch (error) {
+        if (error && typeof error === 'object' && 'code' in error && error.code !== 'ENOENT') {
+          throw error;
+        }
         // Corrupt or concurrently removed records must not hide valid sessions.
       }
     }

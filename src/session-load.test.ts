@@ -1,5 +1,5 @@
 import { describe, it, beforeEach, afterEach, expect, mock } from 'bun:test';
-import type { AgentSideConnection } from '@agentclientprotocol/sdk';
+import type { AgentSideConnection, SessionNotification } from '@agentclientprotocol/sdk';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -158,10 +158,10 @@ describe('AmpAcpAgent session/load', () => {
       prompt: [{ type: 'text', text: 'hello' }],
     });
 
-    const updates: unknown[] = [];
+    const updates: SessionNotification[] = [];
     const capturingClient = {
       ...mockClient,
-      sessionUpdate: async (notification: unknown) => {
+      sessionUpdate: async (notification: SessionNotification) => {
         updates.push(notification);
       },
     } as unknown as AgentSideConnection;
@@ -184,11 +184,15 @@ describe('AmpAcpAgent session/load', () => {
     await second.loadSession({ sessionId: session.sessionId, cwd: '/tmp', mcpServers: [] });
 
     expect(exportedThreads).toEqual(['T-01234567-89ab-cdef-0123-456789abcdef']);
-    const kinds = (updates as { update: { sessionUpdate: string } }[]).map((u) => u.update.sessionUpdate);
+    const kinds = updates.map((u) => u.update.sessionUpdate);
     expect(kinds).toEqual(['user_message_chunk', 'agent_thought_chunk', 'agent_message_chunk']);
-    const texts = (updates as { update: { content?: { text?: string } } }[])
-      .map((u) => u.update.content?.text)
-      .filter(Boolean);
+    const texts = updates.flatMap(({ update }) => {
+      if (update.sessionUpdate === 'user_message_chunk' || update.sessionUpdate === 'agent_message_chunk'
+        || update.sessionUpdate === 'agent_thought_chunk') {
+        return update.content.type === 'text' ? [update.content.text] : [];
+      }
+      return [];
+    });
     expect(texts).toEqual(['hello', 'pondering', 'hi there']);
   });
 
@@ -239,6 +243,71 @@ describe('AmpAcpAgent session/load', () => {
     await agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'after load' }] });
     expect(capturedCalls.at(-1)!.options.mcpConfig).toEqual({ new: { command: 'new-mcp', args: ['new-argument'] } });
     expect(capturedCalls.at(-1)!.options.continue).toBe('T-01234567-89ab-cdef-0123-456789abcdef');
+  });
+
+  it('refreshes MCP servers on resume and continues the recorded thread', async () => {
+    const agent = createAgent();
+    const { sessionId } = await agent.newSession({ cwd: '/tmp', mcpServers: [
+      { name: 'old', command: 'old-mcp', args: ['stale'], env: [] },
+    ] });
+    await agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'first' }] });
+
+    await agent.resumeSession({
+      sessionId,
+      cwd: '/tmp',
+      mcpServers: [{ name: 'fresh', command: 'fresh-mcp', args: ['current'], env: [] }],
+    });
+    await agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'after resume' }] });
+
+    expect(capturedCalls.at(-1)!.options.mcpConfig).toEqual({
+      fresh: { command: 'fresh-mcp', args: ['current'] },
+    });
+    expect(capturedCalls.at(-1)!.options.continue).toBe('T-01234567-89ab-cdef-0123-456789abcdef');
+  });
+
+  it('rejects resume of an unknown session even when continue-latest is enabled', async () => {
+    const previous = process.env.AMP_ACP_CONTINUE_LATEST;
+    process.env.AMP_ACP_CONTINUE_LATEST = '1';
+    try {
+      const agent = createAgent();
+      await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+
+      await expect(agent.resumeSession({
+        sessionId: 'S-unknown-000000',
+        cwd: '/tmp',
+        mcpServers: [],
+      })).rejects.toThrow('No durable Amp thread mapping');
+      expect(capturedCalls).toHaveLength(0);
+    } finally {
+      if (previous === undefined) delete process.env.AMP_ACP_CONTINUE_LATEST;
+      else process.env.AMP_ACP_CONTINUE_LATEST = previous;
+    }
+  });
+
+  it('resumes without exporting or replaying history before the next reply', async () => {
+    const first = createAgent();
+    await first.initialize({ protocolVersion: 1, clientCapabilities: {} });
+    const session = await first.newSession({ cwd: '/tmp', mcpServers: [] });
+    await first.prompt({ sessionId: session.sessionId, prompt: [{ type: 'text', text: 'first' }] });
+
+    const updates: SessionNotification[] = [];
+    const capturingClient = {
+      ...mockClient,
+      sessionUpdate: async (notification: SessionNotification) => { updates.push(notification); },
+    } as unknown as AgentSideConnection;
+    let exports = 0;
+    const second = new AmpAcpAgent(capturingClient, createAmpTransport('sdk'), {
+      exportThread: async () => { exports += 1; return []; },
+      discoverPluginModes: () => [],
+    });
+    await second.initialize({ protocolVersion: 1, clientCapabilities: {} });
+    await second.resumeSession({ sessionId: session.sessionId, cwd: '/tmp', mcpServers: [] });
+
+    expect(exports).toBe(0);
+    expect(updates).toEqual([]);
+    await second.prompt({ sessionId: session.sessionId, prompt: [{ type: 'text', text: 'reply' }] });
+    expect(exports).toBe(0);
+    expect(updates.map((notification) => notification.update.sessionUpdate)).toEqual([]);
   });
 
   it('restores persisted settings on session/resume too', async () => {
