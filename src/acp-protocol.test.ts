@@ -1,8 +1,11 @@
-import { describe, it, beforeEach, expect } from 'bun:test';
+import { describe, it, beforeEach, afterEach, expect } from 'bun:test';
 import { ClientSideConnection, AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk';
 import { AmpAcpAgent } from './server.js';
 import { toAcpNotifications } from './to-acp.js';
 import type { SessionNotification } from '@agentclientprotocol/sdk';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 class TestClient {
   notifications: SessionNotification[] = [];
@@ -19,8 +22,16 @@ describe('ACP Protocol End-to-End', () => {
   let agentToClient: TransformStream;
   let agentConnection: ClientSideConnection;
   let testClient: TestClient;
+  let originalArgv: string[];
+  let authDir: string;
+  let script: string;
 
   beforeEach(() => {
+    originalArgv = process.argv;
+    authDir = mkdtempSync(path.join(os.tmpdir(), 'amp-acp-protocol-auth-'));
+    script = path.join(authDir, 'agent.js');
+    writeFileSync(script, '');
+    process.argv = [process.execPath, script];
     clientToAgent = new TransformStream();
     agentToClient = new TransformStream();
     testClient = new TestClient();
@@ -36,6 +47,11 @@ describe('ACP Protocol End-to-End', () => {
     );
   });
 
+  afterEach(() => {
+    process.argv = originalArgv;
+    rmSync(authDir, { recursive: true, force: true });
+  });
+
   it('should handle initialize request and return correct capabilities', async () => {
     const response = await agentConnection.initialize({
       protocolVersion: 1,
@@ -49,7 +65,8 @@ describe('ACP Protocol End-to-End', () => {
     expect(response.agentCapabilities?.promptCapabilities?.embeddedContext).toBe(true);
     expect(response.agentCapabilities?.mcpCapabilities?.http).toBe(true);
     expect(response.agentCapabilities?.mcpCapabilities?.sse).toBe(true);
-    expect(response.agentCapabilities?.sessionCapabilities?.resume).toEqual({});
+    expect(response.agentCapabilities?.loadSession).toBe(true);
+    expect(response.agentCapabilities?.sessionCapabilities).toEqual({ resume: {}, list: {} });
     expect(response.agentCapabilities?._meta?.['amp-acp/thread-lifecycle']).toEqual({
       version: 1,
       methods: {
@@ -60,7 +77,50 @@ describe('ACP Protocol End-to-End', () => {
     expect(response.authMethods).toHaveLength(1);
     expect(response.authMethods![0].id).toBe('setup');
     expect(response.authMethods![0].name).toBe('Amp API Key Setup');
-    expect(response.authMethods![0]._meta?.['terminal-auth']?.label).toBe('Amp API Key Setup');
+    expect(response.authMethods).toEqual([{
+      id: 'setup', name: 'Amp API Key Setup',
+      description: 'Run interactive setup to configure your Amp API key',
+      _meta: { 'terminal-auth': { command: process.execPath, args: [script, '--setup'], label: 'Amp API Key Setup' } },
+    }]);
+    const command = response.authMethods![0]._meta?.['terminal-auth']?.command;
+    expect(typeof command).toBe('string');
+    expect(existsSync(String(command))).toBe(true);
+  });
+
+  it('advertises standard terminal auth only when the client enables it', async () => {
+    const response = await agentConnection.initialize({ protocolVersion: 1, clientCapabilities: { auth: { terminal: true } } });
+    expect(response.authMethods).toEqual([{
+      id: 'setup', name: 'Amp API Key Setup',
+      description: 'Run interactive setup to configure your Amp API key',
+      type: 'terminal', args: ['--setup'],
+      _meta: { 'terminal-auth': { command: process.execPath, args: [script, '--setup'], label: 'Amp API Key Setup' } },
+    }]);
+  });
+
+  it('keeps standard auth but omits legacy metadata for absent or runtime-only argv', async () => {
+    for (const argv of [[process.execPath], [process.execPath, process.execPath]]) {
+      process.argv = argv;
+      const response = await agentConnection.initialize({ protocolVersion: 1, clientCapabilities: { auth: { terminal: true } } });
+      expect(response.authMethods).toEqual([{
+        id: 'setup', name: 'Amp API Key Setup',
+        description: 'Run interactive setup to configure your Amp API key',
+        type: 'terminal', args: ['--setup'],
+      }]);
+    }
+  });
+
+  it('omits legacy terminal metadata if the original executable disappeared', async () => {
+    const originalArgv = [...process.argv];
+    process.argv[1] = '/nonexistent-auth-binary';
+    try {
+      const response = await agentConnection.initialize({ protocolVersion: 1, clientCapabilities: { auth: { terminal: false } } });
+      expect(response.authMethods).toEqual([{
+        id: 'setup', name: 'Amp API Key Setup',
+        description: 'Run interactive setup to configure your Amp API key',
+      }]);
+    } finally {
+      process.argv = originalArgv;
+    }
   });
 
   it('should handle newSession and return a valid sessionId', async () => {

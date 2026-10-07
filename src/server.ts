@@ -25,6 +25,8 @@ import {
   type SessionConfigOption,
   type LoadSessionRequest,
   type LoadSessionResponse,
+  type ListSessionsRequest,
+  type ListSessionsResponse,
 } from '@agentclientprotocol/sdk';
 import {
   createAmpTransport,
@@ -43,7 +45,9 @@ import {
 import { discoverPluginModes as discoverPluginModesFromDir, type PluginAgentMode } from './plugin-modes.js';
 import { TurnUsage } from './turn-usage.js';
 import { toAcpNotifications } from './to-acp.js';
+import { toAmpPrompt } from './to-amp.js';
 import { exportThreadHistory, exportThreadMessages, historyToNotifications, type ThreadHistoryExporter } from './thread-history.js';
+import { realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import packageJson from '../package.json';
 
@@ -191,6 +195,7 @@ function buildSessionConfigOptions(s: Pick<SessionState, 'mode' | 'model' | 'mod
 
 interface SessionState {
   threadId: string | null;
+  mappingPersisted: boolean;
   controller: AbortController | null;
   cancelled: boolean;
   active: boolean;
@@ -258,7 +263,9 @@ export class AmpAcpAgent implements Agent {
 
   async initialize(request: InitializeRequest): Promise<InitializeResponseWithAgentInfo> {
     this.clientCapabilities = request.clientCapabilities;
-    console.info(`[acp] amp-acp v${PACKAGE_VERSION} initialized`);
+    console.error(`[acp] amp-acp v${PACKAGE_VERSION} initialized`);
+    const terminalAuth = getTerminalAuthCommand(process.argv[1], process.execPath);
+    if (!terminalAuth) console.error('[acp] terminal-auth fallback omitted: no existing non-virtual agent invocation');
     return {
       protocolVersion: 1,
       agentInfo: {
@@ -270,7 +277,7 @@ export class AmpAcpAgent implements Agent {
         loadSession: true,
         promptCapabilities: { image: true, embeddedContext: true },
         mcpCapabilities: { http: true, sse: true },
-        sessionCapabilities: { resume: {} },
+        sessionCapabilities: { resume: {}, list: {} },
         _meta: {
           [THREAD_LIFECYCLE_CAPABILITY]: {
             version: 1,
@@ -286,13 +293,13 @@ export class AmpAcpAgent implements Agent {
           id: 'setup',
           name: 'Amp API Key Setup',
           description: 'Run interactive setup to configure your Amp API key',
-          _meta: {
+          ...(request.clientCapabilities?.auth?.terminal ? { type: 'terminal' as const, args: ['--setup'] } : {}),
+          ...(terminalAuth ? { _meta: {
             'terminal-auth': {
-              command: getTerminalAuthCommand(),
-              args: ['--setup'],
+              ...terminalAuth,
               label: 'Amp API Key Setup',
             },
-          },
+          } } : {}),
         },
       ],
     };
@@ -306,6 +313,7 @@ export class AmpAcpAgent implements Agent {
 
     const session: SessionState = {
       threadId: null,
+      mappingPersisted: false,
       controller: null,
       cancelled: false,
       active: false,
@@ -345,6 +353,46 @@ export class AmpAcpAgent implements Agent {
     return result;
   }
 
+  async listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
+    if (params.cwd != null && (!path.isAbsolute(params.cwd) || params.cwd.includes('\0'))) {
+      throw RequestError.invalidParams(undefined, 'Session list cwd must be an absolute path');
+    }
+    const cwd = params.cwd != null ? path.resolve(params.cwd) : null;
+    let after: { updatedAt: string; sessionId: string } | undefined;
+    if (params.cursor != null) {
+      try {
+        const bytes = Buffer.from(params.cursor, 'base64url');
+        if (bytes.toString('base64url') !== params.cursor) throw new Error('Invalid cursor encoding');
+        const cursor: unknown = JSON.parse(bytes.toString('utf8'));
+        if (!cursor || typeof cursor !== 'object'
+          || !('cwd' in cursor) || cursor.cwd !== cwd
+          || !('updatedAt' in cursor) || typeof cursor.updatedAt !== 'string'
+          || new Date(cursor.updatedAt).toISOString() !== cursor.updatedAt
+          || !('sessionId' in cursor) || typeof cursor.sessionId !== 'string') {
+          throw new Error('Invalid cursor contents');
+        }
+        after = { updatedAt: cursor.updatedAt, sessionId: cursor.sessionId };
+      } catch {
+        throw RequestError.invalidParams(undefined, 'Invalid session list cursor');
+      }
+    }
+    const sessions = (await this.threadStore.list()).flatMap((mapping) => {
+      if (!mapping.cwd || !path.isAbsolute(mapping.cwd) || mapping.cwd.includes('\0') || !mapping.updatedAt) return [];
+      const sessionCwd = path.resolve(mapping.cwd);
+      if (cwd && sessionCwd !== cwd) return [];
+      return [{ sessionId: mapping.sessionId, cwd: sessionCwd, updatedAt: mapping.updatedAt }];
+    }).sort((a, b) => a.updatedAt > b.updatedAt ? -1 : a.updatedAt < b.updatedAt ? 1
+      : a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0);
+    const remaining = after ? sessions.filter((session) => session.updatedAt < after.updatedAt
+      || (session.updatedAt === after.updatedAt && session.sessionId > after.sessionId)) : sessions;
+    const page = remaining.slice(0, 50);
+    const last = page.at(-1);
+    const nextCursor = remaining.length > 50 && last
+      ? Buffer.from(JSON.stringify({ cwd, updatedAt: last.updatedAt, sessionId: last.sessionId })).toString('base64url')
+      : undefined;
+    return { sessions: page, ...(nextCursor ? { nextCursor } : {}) };
+  }
+
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     let session = this.sessions.get(params.sessionId);
 
@@ -356,6 +404,8 @@ export class AmpAcpAgent implements Agent {
       session = this.sessionFromMapping(mapping, params);
       this.sessions.set(params.sessionId, session);
       console.error(`[acp] loaded session ${params.sessionId} -> thread ${mapping.threadId}`);
+    } else {
+      session.mcpConfig = convertAcpMcpServersToAmpConfig(params.mcpServers);
     }
 
     if (session.threadId) {
@@ -409,6 +459,7 @@ export class AmpAcpAgent implements Agent {
     const models = buildAmpModels(this.discoverPluginModes(cwd));
     return {
       threadId: mapping.threadId,
+      mappingPersisted: true,
       controller: null,
       cancelled: false,
       active: false,
@@ -434,6 +485,7 @@ export class AmpAcpAgent implements Agent {
       executor: s.executor,
       cwd: s.cwd,
     });
+    s.mappingPersisted = true;
   }
 
   /** Persist best-effort: a failed write must not reject a config change. */
@@ -465,40 +517,15 @@ export class AmpAcpAgent implements Agent {
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const s = this.sessions.get(params.sessionId);
     if (!s) throw new Error('Session not found');
+    const parts = toAmpPrompt(params.prompt);
+    const hasImages = parts.some((part) => part.type === 'image');
+    const transport = s.executor === 'orb' ? this.orbTransport : this.transport;
+    if (hasImages && (s.executor === 'orb' || transport.name === 'sdk')) {
+      throw RequestError.invalidParams(undefined, 'Images are not supported in Orb/SDK execution');
+    }
+    const prompt = hasImages ? parts : parts.map((part) => part.type === 'text' ? part.text : '').join('');
     s.cancelled = false;
     s.active = true;
-
-    let textInput = '';
-    for (const chunk of params.prompt) {
-      switch (chunk.type) {
-        case 'text':
-          if (chunk.text.trim() === '/init') {
-            textInput += `Please analyze this codebase and create an AGENTS.md file containing:
-1. Build/lint/test commands - especially for running a single test
-2. Architecture and codebase structure information, including important subprojects, internal APIs, databases, etc.
-3. Code style guidelines, including imports, conventions, formatting, types, naming conventions, error handling, etc.
-
-The file you create will be given to agentic coding tools (such as yourself) that operate in this repository. Make it about 20 lines long.
-
-If there are Cursor rules (in .cursor/rules/ or .cursorrules), Claude rules (CLAUDE.md), Windsurf rules (.windsurfrules), Cline rules (.clinerules), Goose rules (.goosehints), or Copilot rules (in .github/copilot-instructions.md), make sure to include them. Also, first check if there is an existing AGENTS.md or AGENT.md file, and if so, update it instead of overwriting it.`;
-          } else {
-            textInput += chunk.text;
-          }
-          break;
-        case 'resource_link':
-          textInput += `\n${chunk.uri}\n`;
-          break;
-        case 'resource':
-          if ('text' in chunk.resource) {
-            textInput += `\n<context ref="${chunk.resource.uri}">\n${chunk.resource.text}\n</context>\n`;
-          }
-          break;
-        case 'image':
-          break;
-        default:
-          break;
-      }
-    }
 
     const options: AmpExecutionOptions = {
       cwd: s.cwd,
@@ -530,10 +557,14 @@ If there are Cursor rules (in .cursor/rules/ or .cursorrules), Claude rules (CLA
     const controller = new AbortController();
     s.controller = controller;
     const turnUsage = new TurnUsage();
+    let failed = false;
+    let succeeded = false;
 
     try {
-      const transport = s.executor === 'orb' ? this.orbTransport : this.transport;
-      for await (const message of transport.execute({ prompt: textInput, options, signal: controller.signal })) {
+      // A retry after an initial mapping write failure must not bypass
+      // durable ownership, or fall back to creating a different thread.
+      if (s.threadId && !s.mappingPersisted) await this.persistSession(params.sessionId, s);
+      for await (const message of transport.execute({ prompt, options, signal: controller.signal })) {
         turnUsage.add(message);
         if (message.session_id) {
           if (!isAmpThreadId(message.session_id)) {
@@ -559,7 +590,11 @@ If there are Cursor rules (in .cursor/rules/ or .cursorrules), Claude rules (CLA
           }
         }
 
+        if (message.type === 'result') {
+          succeeded = message.subtype === 'success' && message.is_error === false;
+        }
         if (message.type === 'result' && message.is_error) {
+          failed = true;
           if (typeof message.error === 'string' && isAuthError(message.error)) {
             console.error('[amp] Auth error in result, requesting authentication:', message.error);
             throw RequestError.authRequired();
@@ -571,8 +606,22 @@ If there are Cursor rules (in .cursor/rules/ or .cursorrules), Claude rules (CLA
         }
       }
 
+      const stopReason = s.cancelled ? 'cancelled' : 'end_turn';
+      // Execution is over; cancellation during bookkeeping must not change
+      // the outcome after a successful activity write has already begun.
+      s.controller = null;
+      if (succeeded && stopReason === 'end_turn' && !failed) {
+        try {
+          await this.persistSession(params.sessionId, s);
+        } catch (error) {
+          // Amp already completed the work; failing the turn could cause a
+          // client retry to duplicate tool side effects. Ownership was saved
+          // at thread initialization; only the activity refresh failed here.
+          console.error('[acp] Amp turn completed, but failed to persist session activity', error);
+        }
+      }
       const usage = turnUsage.toAcp();
-      return { stopReason: s.cancelled ? 'cancelled' : 'end_turn', ...(usage ? { usage } : {}) };
+      return { stopReason, ...(usage ? { usage } : {}) };
     } catch (err) {
       if (s.cancelled || (err instanceof Error && (err.name === 'AbortError' || err.message.includes('aborted')))) {
         return { stopReason: 'cancelled' };
@@ -736,12 +785,30 @@ export function isAuthError(message: string): boolean {
 }
 
 export function getTerminalAuthCommand(
-  argv1: string | undefined = process.argv[1],
-  execPath: string = process.execPath,
-): string {
-  const resolvedArgv1 = argv1 ? path.resolve(argv1) : '';
-  if (!resolvedArgv1 || resolvedArgv1.startsWith('/$bunfs/')) {
-    return execPath;
+  argv1: string | undefined,
+  execPath: string,
+  standalone = typeof Bun !== 'undefined' && Bun.isStandaloneExecutable === true,
+): { command: string; args: string[] } | undefined {
+  const isVirtual = (value: string) => {
+    try {
+      value = decodeURIComponent(value);
+    } catch {
+      // Existing filenames may contain literal, non-encoded percent signs.
+    }
+    return /^(?:\/\$bunfs\/|[a-z]:\/~BUN\/)/i.test(value.replaceAll('\\', '/'));
+  };
+  const candidate = standalone ? execPath : argv1;
+  if (!candidate || isVirtual(candidate)) return undefined;
+  try {
+    // npx can launch an extensionless symlink; validate the actual file too.
+    const script = realpathSync(path.resolve(candidate));
+    if (isVirtual(script) || !statSync(script).isFile()) return undefined;
+    if (standalone) return { command: script, args: ['--setup'] };
+    if (!/\.(?:js|mjs|cjs)$/i.test(script) || isVirtual(execPath)) return undefined;
+    const runtime = realpathSync(path.resolve(execPath));
+    if (isVirtual(runtime) || !statSync(runtime).isFile()) return undefined;
+    return { command: runtime, args: [script, '--setup'] };
+  } catch {
+    return undefined;
   }
-  return resolvedArgv1;
 }

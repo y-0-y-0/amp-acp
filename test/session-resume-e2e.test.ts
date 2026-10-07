@@ -178,6 +178,7 @@ describe('durable session resume across adapter restarts', () => {
       model: 'medium',
       executor: 'local',
       cwd: fixtureDir,
+      updatedAt: expect.any(String),
     });
 
     // Second adapter process, same state dir: resume must reattach.
@@ -192,7 +193,7 @@ describe('durable session resume across adapter restarts', () => {
         const resume = await agent.request(methods.agent.session.resume, {
           sessionId,
           cwd: fixtureDir,
-          mcpServers: [],
+          mcpServers: [{ name: 'resumed', command: 'resumed-mcp', args: ['new-connection'], env: [] }],
         });
         expect(Array.isArray(resume.configOptions)).toBe(true);
 
@@ -249,6 +250,9 @@ describe('durable session resume across adapter restarts', () => {
     expect(executions[0]!.argv).not.toContain('continue');
     expect(executions[1]!.argv.slice(0, 3)).toEqual(['threads', 'continue', THREAD_ID]);
     expect(executions[1]!.prompt).toBe('second turn');
+    const mcpIndex = executions[1]!.argv.indexOf('--mcp-config');
+    expect(mcpIndex).toBeGreaterThanOrEqual(0);
+    expect(JSON.parse(executions[1]!.argv[mcpIndex + 1]!)).toEqual({ resumed: { command: 'resumed-mcp', args: ['new-connection'] } });
     expect(archives.map((entry) => entry.argv)).toContainEqual([
       'threads',
       'archive',

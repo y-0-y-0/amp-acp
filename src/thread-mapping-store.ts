@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
+import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { isAmpThreadId } from './amp-transport.js';
 
@@ -17,11 +18,14 @@ export interface AmpThreadMapping {
   executor?: string;
   /** Working directory the session ran in, if persisted. */
   cwd?: string;
+  /** ISO 8601 last activity timestamp; older records use file mtime in list(). */
+  updatedAt?: string;
 }
 
 export interface ThreadMappingStore {
   load(sessionId: string): Promise<AmpThreadMapping | null>;
   save(mapping: AmpThreadMapping): Promise<void>;
+  list(): Promise<AmpThreadMapping[]>;
 }
 
 function assertAcpSessionId(sessionId: string): void {
@@ -52,6 +56,15 @@ function validateMapping(value: unknown, expectedSessionId: string): AmpThreadMa
       throw new Error(`Invalid persisted mapping for ACP session ${expectedSessionId}`);
     }
     result[field] = fieldValue;
+  }
+  if (mapping.updatedAt !== undefined) {
+    if (typeof mapping.updatedAt !== 'string'
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(mapping.updatedAt)
+      || !Number.isFinite(Date.parse(mapping.updatedAt))
+      || new Date(`${mapping.updatedAt.slice(0, 10)}T00:00:00Z`).toISOString().slice(0, 10) !== mapping.updatedAt.slice(0, 10)) {
+      throw new Error(`Invalid persisted mapping for ACP session ${expectedSessionId}`);
+    }
+    result.updatedAt = new Date(mapping.updatedAt).toISOString();
   }
   return result;
 }
@@ -88,8 +101,36 @@ export class FileThreadMappingStore implements ThreadMappingStore {
     await mkdir(this.sessionsDir, { recursive: true, mode: 0o700 });
     const destination = this.mappingPath(mapping.sessionId);
     const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(mapping)}\n`, { mode: 0o600 });
+    await writeFile(temporary, `${JSON.stringify({ ...mapping, updatedAt: new Date().toISOString() })}\n`, { mode: 0o600 });
     await rename(temporary, destination);
+  }
+
+  async list(): Promise<AmpThreadMapping[]> {
+    let files: Dirent[];
+    try {
+      files = await readdir(this.sessionsDir, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    const mappings: AmpThreadMapping[] = [];
+    for (const file of files) {
+      if (!file.isFile() || !file.name.endsWith('.json')) continue;
+      const sessionId = file.name.slice(0, -5);
+      if (!ACP_SESSION_ID_PATTERN.test(sessionId)) continue;
+      try {
+        const mapping = await this.load(sessionId);
+        if (!mapping) continue;
+        const updatedAt = mapping.updatedAt ?? (await stat(this.mappingPath(sessionId))).mtime.toISOString();
+        mappings.push({ ...mapping, updatedAt });
+      } catch (error) {
+        if (error && typeof error === 'object' && 'code' in error && error.code !== 'ENOENT') {
+          throw error;
+        }
+        // Corrupt or concurrently removed records must not hide valid sessions.
+      }
+    }
+    return mappings;
   }
 
   private mappingPath(sessionId: string): string {

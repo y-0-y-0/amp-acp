@@ -57,6 +57,8 @@ The [Model Context Protocol (MCP)](https://modelcontextprotocol.io) is an open s
 3. **Format Conversion**: amp-acp converts the ACP format to Amp SDK's `mcpConfig` format
 4. **MCP Connection**: Amp SDK connects to the configured MCP servers and loads their tools
 
+On `session/load` or `session/resume`, the adapter replaces session MCP configuration with the servers supplied by the current client connection, including when `session/load` reuses an in-memory session. Configurations and credentials are not saved in the durable thread mapping. Local execution forwards the refreshed configuration through CLI `--mcp-config` or SDK options; Orb execution continues to use project-side MCP configuration instead.
+
 ## Supported Server Types
 
 ### stdio (Local MCP Servers)

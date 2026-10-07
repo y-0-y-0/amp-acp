@@ -81,17 +81,22 @@ Requires Node.js 18+.
 
 Run `amp login` before starting amp-acp. The adapter and CLI share the same Amp credentials. For headless environments, `AMP_API_KEY` is also supported. `amp-acp --setup` remains available as an interactive API-key setup fallback.
 
+For clients that advertise `clientCapabilities.auth.terminal`, the **Amp API Key Setup** method uses ACP's standard terminal authentication: the client reruns its configured agent invocation with `--setup` appended. This avoids storing an installation path in the button. Older clients receive the compatibility `_meta["terminal-auth"]` command only when its executable and script are real files, not virtual Bun paths. JavaScript entry points (including npx symlinks) run through `process.execPath` with the script path and `--setup`. A scriptless executable fallback requires confirmed standalone Bun mode; `node --setup` and `bun --setup` without a script are never advertised. An unresolved fallback is omitted and logged to stderr. `authenticate` remains tolerant of legacy callers, but standard terminal methods must not be passed to it by clients.
+
+Linux tests verify that compiled and Node compatibility launchers reach the setup prompt and abort on empty input without saving a credential. npx symlink resolution and virtual Windows Bun paths are covered by synthetic tests, not a Windows runtime test. The setup button itself has not been exercised in Zed. No API keys are logged, and the interactive `--setup` flow is unchanged.
+
 ![Auth Process](img/auth-process.png)
 
 ## Features
 
 - **Streaming responses** — Amp messages, tool calls, and thinking are streamed in real-time via ACP
-- **Image support** — Handles image content blocks from Amp (base64 and URL)
+- **Input images** — Local CLI prompts deliver ordered text and base64 JPEG, PNG, GIF, or WebP images; invalid images fail before Amp starts
+- **Output images** — Converts image content blocks from Amp to ACP (base64 and URL)
 - **MCP passthrough** — MCP servers configured in Zed are automatically passed through to Amp
 - **Session configuration** — Choose local or Orb execution, configure permissions (*Default* or *Bypass*), and select the current Amp mode via ACP config options: the built-in `low`, `medium`, `high`, and `ultra` modes, plus any agent modes registered by Amp plugins (project, system, personal, or workspace — such as `grok45` from the Workspace `official-modes` plugin)
 - **`/init` command** — Type `/init` to generate an `AGENTS.md` file for your project
 - **Conversation continuity** — Thread context is preserved across multiple prompts within a session
-- **Session resume** — `session/load` reattaches to the underlying Amp thread after amp-acp restarts, so ACP clients can reopen earlier sessions
+- **Session history and resume** — `session/list` discovers durable sessions; `session/load` replays available history and `session/resume` restores context without replay after amp-acp restarts
 - **Native thread lifecycle** — ACP clients can persist Amp's durable thread ID and archive or unarchive that exact thread
 - **Token usage** — each `session/prompt` answers with the turn's token usage (`PromptResponse.usage`: input, output, cache reads and writes), counted from the usage Amp reports for each model response
 
@@ -99,7 +104,7 @@ Run `amp login` before starting amp-acp. The adapter and CLI share the same Amp 
 
 Amp's streamed `session_id` is a durable `T-...` thread ID, distinct from amp-acp's `S-...` ACP session ID. amp-acp persists that exact mapping under `$XDG_STATE_HOME/amp-acp/sessions` (or `$AMP_ACP_STATE_DIR/sessions`) so `session/resume`, `session/load`, and native archival remain safe after adapter restarts. It never reconstructs the relationship from a working directory, title, timestamp, or thread listing.
 
-Mappings are small JSON records written atomically to an owner-only state directory (`0700`) with owner-only files (`0600`). They contain the ACP session ID, Amp thread ID, and the session's permission mode, Amp mode, and working directory — never prompts, responses, or credentials.
+Mappings are small JSON records written atomically to an owner-only state directory (`0700`) with owner-only files (`0600`). They contain the ACP session ID, Amp thread ID, permission mode, Amp mode, execution environment, working directory and last activity timestamp — never prompts, responses, titles derived from content, or credentials.
 
 Compatible ACP clients can detect protocol revision 1 at `agentCapabilities._meta["amp-acp/thread-lifecycle"]` and use these custom methods:
 
@@ -126,13 +131,25 @@ When the environment variable `AMP_ACP_CONTINUE_LATEST=1` is set, the first prom
 
 ### Resuming sessions
 
-amp-acp advertises the ACP `loadSession` capability. Once a prompt has started an Amp thread, the ACP session ID is mapped to that thread in the durable session store described above (`$XDG_STATE_HOME/amp-acp/sessions`, one file per session; respects `%LOCALAPPDATA%\amp-acp` on Windows and can be overridden with `AMP_ACP_STATE_DIR`). The store also records the session's permission mode, Amp mode, and execution environment, so when a client calls `session/load`, amp-acp restores those settings and continues the same thread (equivalent to `amp threads continue <id>`), even across amp-acp process restarts.
+amp-acp advertises `loadSession: true` and `sessionCapabilities: { resume: {}, list: {} }`. Once a prompt has started an Amp thread, the ACP session ID is mapped to that exact thread in the durable session store described above. Storage defaults to `$XDG_STATE_HOME/amp-acp/sessions`, or `~/.local/state/amp-acp/sessions` when `XDG_STATE_HOME` is absent; `AMP_ACP_STATE_DIR` overrides the state directory on any platform. Windows does not automatically select `%LOCALAPPDATA%`; set `AMP_ACP_STATE_DIR` explicitly when a different location is needed. Use the same state directory after restarting the adapter. `session/load` and `session/resume` restore settings and continue the exact recorded thread (`amp threads continue <id>`). MCP configurations come from the new connection's load/resume request, not from persisted credentials.
 
-During `session/load`, prior messages are replayed to the client as `session/update` notifications (user/agent messages, thinking, and tool calls) using `amp threads export`, so the client can rebuild the transcript. Replay is best-effort: if the export fails, the session still loads and the thread still continues with full server-side context.
+`session/list` returns only validated durable mappings with a usable absolute working directory. An optional absolute `cwd` filter matches normalized paths exactly, not parent directories or similarly named projects; absent or null `cwd` and `cursor` mean no filter and the first page. Results are ordered by descending `updatedAt` with stable session-ID ties and opaque cursors, 50 sessions per page. Pagination does not guarantee a consistent snapshot while sessions change concurrently. Each save updates the ISO 8601 activity timestamp; the end-of-turn refresh requires an explicit Amp success result (`subtype: "success"`, `is_error: false`) without cancellation. An exhausted iterator alone is not success. Older mappings use file mtime. Corrupt records are ignored while listing, but global directory access errors are reported. A missing mapping never causes load/resume to select a different thread. Sessions without a durable mapping cannot be discovered after a restart.
+
+An activity-refresh write failure after Amp completes a turn is logged to stderr and leaves the previous timestamp, rather than reporting completed tool work as failed. Execution completion is the cancellation cutoff: a cancellation received during the final activity write cannot retroactively cancel completed Amp work. Initial thread ownership must still be persisted successfully; retries after an initial mapping write failure cannot execute until that exact mapping has been saved.
+
+Session titles are deliberately absent to preserve the no-content storage guarantee. The fallback label Zed displays for an untitled session has not been observed in this change. A title derived from the start of the first prompt could improve history labels, but would require an explicit privacy/documentation change and is not implemented. Zed history discovery remains unverified here; use **dev: open acp logs** to check for `session/list` followed by `session/load` in an installed Zed build.
+
+During `session/load`, prior messages are replayed to the client as `session/update` notifications (user/agent messages, thinking, and tool calls) using `amp threads export`, so the client can rebuild the transcript. Replay is best-effort: if the export fails or stays empty, the session still loads and the next prompt requests continuation of the recorded thread, but the client may show no previous messages. Export failure does not establish that native Amp context is lost; neither does the durable mapping prove that the native thread still exists. `session/resume` intentionally does not replay history, as specified by ACP. Fake transports and a simulated ACP client verify discovery, replay schemas, exact thread selection and refreshed MCP configuration passed to the next prompt; they do not verify native continuation or a real MCP connection.
 
 ### Amp execution transport
 
 By default, amp-acp executes the installed Amp CLI directly through its streaming JSON interface. Set `AMP_ACP_TRANSPORT=sdk` to use `@ampcode/sdk` as a compatibility fallback; both transports support the current `low`, `medium`, `high`, and `ultra` Amp modes, plus any plugin agent modes (see below).
+
+Image prompts use one JSONL user message with `--stream-json-input`, including when continuing an exact thread. Text-only prompts keep the existing plain stdin path. Image MIME types must match decoded magic bytes; `image/jpg` is normalized to `image/jpeg`. Only `file://` image URIs are forwarded as `source_path`; HTTP URIs are not used as image sources. SVG, HEIC, BMP, malformed base64 and MIME mismatches are rejected with ACP `invalidParams`, without partial prompt delivery.
+
+Signature checks identify the declared format; they do not decode or validate the complete image. Amp omits input images from streamed `user` messages on stdout, so a missing image in that echo does not show that input delivery failed. Tests capture the actual stdin bytes and verify that a session remains reusable after an image is rejected; this does not prove that a real model can read the image.
+
+The pinned Amp SDK (also the latest published version checked for this change) supports text input only. **Images are not supported in Orb execution or with `AMP_ACP_TRANSPORT=sdk`**: the entire turn fails explicitly before execution. ACP advertises image support globally, not per session, so clients must select local CLI execution for image prompts. Fake-CLI tests verify the actual stdin payload and thread continuation; real Amp image inference and the Zed image UI have not been verified for this change.
 
 ### Plugin agent modes
 

@@ -45,6 +45,7 @@ describe('AmpAcpAgent prompt() continue option', () => {
     agent = new AmpAcpAgent(mockClient, createAmpTransport('sdk'), {
       threadStore: {
         load: async (sessionId) => mappings.get(sessionId) ?? null,
+        list: async () => [...mappings.values()],
         save: async (mapping) => {
           mappings.set(mapping.sessionId, mapping);
         },
