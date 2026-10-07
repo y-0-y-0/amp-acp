@@ -147,6 +147,8 @@ By default, amp-acp executes the installed Amp CLI directly through its streamin
 
 Image prompts use one JSONL user message with `--stream-json-input`, including when continuing an exact thread. Text-only prompts keep the existing plain stdin path. Image MIME types must match decoded magic bytes; `image/jpg` is normalized to `image/jpeg`. Only `file://` image URIs are forwarded as `source_path`; HTTP URIs are not used as image sources. SVG, HEIC, BMP, malformed base64 and MIME mismatches are rejected with ACP `invalidParams`, without partial prompt delivery.
 
+Signature checks identify the declared format; they do not decode or validate the complete image. Amp omits input images from streamed `user` messages on stdout, so a missing image in that echo does not show that input delivery failed. Tests capture the actual stdin bytes and verify that a session remains reusable after an image is rejected; this does not prove that a real model can read the image.
+
 The pinned Amp SDK (also the latest published version checked for this change) supports text input only. **Images are not supported in Orb execution or with `AMP_ACP_TRANSPORT=sdk`**: the entire turn fails explicitly before execution. ACP advertises image support globally, not per session, so clients must select local CLI execution for image prompts. Fake-CLI tests verify the actual stdin payload and thread continuation; real Amp image inference and the Zed image UI have not been verified for this change.
 
 ### Plugin agent modes
