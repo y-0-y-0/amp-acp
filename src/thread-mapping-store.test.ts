@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { FileThreadMappingStore } from './thread-mapping-store.js';
@@ -26,6 +26,7 @@ describe('FileThreadMappingStore', () => {
     expect(await restartedProcess.load(sessionId)).toEqual({
       sessionId,
       threadId,
+      updatedAt: expect.any(String),
     });
   });
 
@@ -46,16 +47,31 @@ describe('FileThreadMappingStore', () => {
       model: 'high',
       executor: 'orb',
       cwd: '/tmp/project',
+      updatedAt: expect.any(String),
     });
   });
 
   it('loads mappings written before settings were persisted', async () => {
-    const store = new FileThreadMappingStore(stateDir);
-    await store.save({ sessionId, threadId });
+    await mkdir(path.join(stateDir, 'sessions'));
+    await writeFile(path.join(stateDir, 'sessions', `${sessionId}.json`), JSON.stringify({ sessionId, threadId }));
 
     const loaded = await new FileThreadMappingStore(stateDir).load(sessionId);
     expect(loaded).toEqual({ sessionId, threadId });
     expect(loaded?.mode).toBeUndefined();
+  });
+
+  it('lists an empty state directory and stamps each atomic save with current activity', async () => {
+    const store = new FileThreadMappingStore(stateDir);
+    expect(await store.list()).toEqual([]);
+    const before = Date.now();
+    await store.save({ sessionId, threadId, updatedAt: '2020-01-01T00:00:00.000Z' });
+    const mapping = await store.load(sessionId);
+    expect(Date.parse(mapping!.updatedAt!)).toBeGreaterThanOrEqual(before);
+    expect(Date.parse(mapping!.updatedAt!)).toBeLessThanOrEqual(Date.now());
+    if (process.platform !== 'win32') {
+      expect((await stat(path.join(stateDir, 'sessions'))).mode & 0o777).toBe(0o700);
+      expect((await stat(path.join(stateDir, 'sessions', `${sessionId}.json`))).mode & 0o777).toBe(0o600);
+    }
   });
 
   it('rejects settings fields with the wrong type', async () => {

@@ -12,9 +12,10 @@ This is an ACP (Agent Client Protocol) adapter that bridges Amp Code to ACP-comp
 
 - `src/index.ts` — Entry point, redirects console to stderr (stdout reserved for ACP stream)
 - `src/run-acp.ts` — Sets up ACP connection using stdin/stdout JSON streams
-- `src/server.ts` — `AmpAcpAgent` class: handles sessions, prompts, MCP config, and calls `@ampcode/sdk` (formerly `@sourcegraph/amp-sdk`)
+- `src/server.ts` — `AmpAcpAgent` class: handles prompts, capability-gated terminal auth, durable session list/load/resume, refreshed connection MCP config, and CLI/SDK execution
 - `src/amp-transport.ts` — Executes Amp through the CLI or SDK and manages native thread archival
-- `src/thread-mapping-store.ts` — Persists durable ACP-session-to-Amp-thread mappings for resume and lifecycle operations
+- `src/thread-mapping-store.ts` — Atomically persists exact ACP-session-to-Amp-thread mappings and activity timestamps; lists validated records with legacy mtime fallback, without prompt/response content or heuristic thread recovery
+- `src/thread-history.ts` — Best-effort Amp thread export and ACP notification replay on load; resume restores context without replay
 - `src/to-acp.ts` — Converts Amp stream events to ACP `sessionUpdate` notifications
 - `src/to-amp.ts` — Converts ordered ACP prompt parts, validates base64 image MIME/magic bytes; CLI image prompts use JSONL, while Orb/SDK rejects images before execution
 - `src/mcp-config.ts` — Converts ACP MCP server configs to Amp SDK format

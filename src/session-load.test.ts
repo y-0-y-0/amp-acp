@@ -227,6 +227,20 @@ describe('AmpAcpAgent session/load', () => {
     expect(loaded.configOptions).toBeDefined();
   });
 
+  it('refreshes MCP servers on load even when the session is already in memory', async () => {
+    const agent = createAgent();
+    const { sessionId } = await agent.newSession({ cwd: '/tmp', mcpServers: [
+      { name: 'old', command: 'old-mcp', args: [], env: [] },
+    ] });
+    await agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'first' }] });
+    await agent.loadSession({ sessionId, cwd: '/tmp', mcpServers: [
+      { name: 'new', command: 'new-mcp', args: ['new-argument'], env: [] },
+    ] });
+    await agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'after load' }] });
+    expect(capturedCalls.at(-1)!.options.mcpConfig).toEqual({ new: { command: 'new-mcp', args: ['new-argument'] } });
+    expect(capturedCalls.at(-1)!.options.continue).toBe('T-01234567-89ab-cdef-0123-456789abcdef');
+  });
+
   it('restores persisted settings on session/resume too', async () => {
     const first = createAgent();
     await first.initialize({ protocolVersion: 1, clientCapabilities: {} });

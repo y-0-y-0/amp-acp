@@ -25,6 +25,8 @@ import {
   type SessionConfigOption,
   type LoadSessionRequest,
   type LoadSessionResponse,
+  type ListSessionsRequest,
+  type ListSessionsResponse,
 } from '@agentclientprotocol/sdk';
 import {
   createAmpTransport,
@@ -193,6 +195,7 @@ function buildSessionConfigOptions(s: Pick<SessionState, 'mode' | 'model' | 'mod
 
 interface SessionState {
   threadId: string | null;
+  mappingPersisted: boolean;
   controller: AbortController | null;
   cancelled: boolean;
   active: boolean;
@@ -274,7 +277,7 @@ export class AmpAcpAgent implements Agent {
         loadSession: true,
         promptCapabilities: { image: true, embeddedContext: true },
         mcpCapabilities: { http: true, sse: true },
-        sessionCapabilities: { resume: {} },
+        sessionCapabilities: { resume: {}, list: {} },
         _meta: {
           [THREAD_LIFECYCLE_CAPABILITY]: {
             version: 1,
@@ -310,6 +313,7 @@ export class AmpAcpAgent implements Agent {
 
     const session: SessionState = {
       threadId: null,
+      mappingPersisted: false,
       controller: null,
       cancelled: false,
       active: false,
@@ -349,6 +353,46 @@ export class AmpAcpAgent implements Agent {
     return result;
   }
 
+  async listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
+    if (params.cwd != null && !path.isAbsolute(params.cwd)) {
+      throw RequestError.invalidParams(undefined, 'Session list cwd must be an absolute path');
+    }
+    const cwd = params.cwd != null ? path.resolve(params.cwd) : null;
+    let after: { updatedAt: string; sessionId: string } | undefined;
+    if (params.cursor != null) {
+      try {
+        const bytes = Buffer.from(params.cursor, 'base64url');
+        if (bytes.toString('base64url') !== params.cursor) throw new Error('Invalid cursor encoding');
+        const cursor: unknown = JSON.parse(bytes.toString('utf8'));
+        if (!cursor || typeof cursor !== 'object'
+          || !('cwd' in cursor) || cursor.cwd !== cwd
+          || !('updatedAt' in cursor) || typeof cursor.updatedAt !== 'string'
+          || new Date(cursor.updatedAt).toISOString() !== cursor.updatedAt
+          || !('sessionId' in cursor) || typeof cursor.sessionId !== 'string') {
+          throw new Error('Invalid cursor contents');
+        }
+        after = { updatedAt: cursor.updatedAt, sessionId: cursor.sessionId };
+      } catch {
+        throw RequestError.invalidParams(undefined, 'Invalid session list cursor');
+      }
+    }
+    const sessions = (await this.threadStore.list()).flatMap((mapping) => {
+      if (!mapping.cwd || !mapping.updatedAt) return [];
+      const sessionCwd = path.resolve(mapping.cwd);
+      if (cwd && sessionCwd !== cwd) return [];
+      return [{ sessionId: mapping.sessionId, cwd: sessionCwd, updatedAt: mapping.updatedAt }];
+    }).sort((a, b) => a.updatedAt > b.updatedAt ? -1 : a.updatedAt < b.updatedAt ? 1
+      : a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0);
+    const remaining = after ? sessions.filter((session) => session.updatedAt < after.updatedAt
+      || (session.updatedAt === after.updatedAt && session.sessionId > after.sessionId)) : sessions;
+    const page = remaining.slice(0, 50);
+    const last = page.at(-1);
+    const nextCursor = remaining.length > 50 && last
+      ? Buffer.from(JSON.stringify({ cwd, updatedAt: last.updatedAt, sessionId: last.sessionId })).toString('base64url')
+      : undefined;
+    return { sessions: page, ...(nextCursor ? { nextCursor } : {}) };
+  }
+
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     let session = this.sessions.get(params.sessionId);
 
@@ -360,6 +404,8 @@ export class AmpAcpAgent implements Agent {
       session = this.sessionFromMapping(mapping, params);
       this.sessions.set(params.sessionId, session);
       console.error(`[acp] loaded session ${params.sessionId} -> thread ${mapping.threadId}`);
+    } else {
+      session.mcpConfig = convertAcpMcpServersToAmpConfig(params.mcpServers);
     }
 
     if (session.threadId) {
@@ -413,6 +459,7 @@ export class AmpAcpAgent implements Agent {
     const models = buildAmpModels(this.discoverPluginModes(cwd));
     return {
       threadId: mapping.threadId,
+      mappingPersisted: true,
       controller: null,
       cancelled: false,
       active: false,
@@ -438,6 +485,7 @@ export class AmpAcpAgent implements Agent {
       executor: s.executor,
       cwd: s.cwd,
     });
+    s.mappingPersisted = true;
   }
 
   /** Persist best-effort: a failed write must not reject a config change. */
@@ -509,8 +557,12 @@ export class AmpAcpAgent implements Agent {
     const controller = new AbortController();
     s.controller = controller;
     const turnUsage = new TurnUsage();
+    let failed = false;
 
     try {
+      // A retry after an initial mapping write failure must not bypass
+      // durable ownership, or fall back to creating a different thread.
+      if (s.threadId && !s.mappingPersisted) await this.persistSession(params.sessionId, s);
       for await (const message of transport.execute({ prompt, options, signal: controller.signal })) {
         turnUsage.add(message);
         if (message.session_id) {
@@ -538,6 +590,7 @@ export class AmpAcpAgent implements Agent {
         }
 
         if (message.type === 'result' && message.is_error) {
+          failed = true;
           if (typeof message.error === 'string' && isAuthError(message.error)) {
             console.error('[amp] Auth error in result, requesting authentication:', message.error);
             throw RequestError.authRequired();
@@ -549,6 +602,16 @@ export class AmpAcpAgent implements Agent {
         }
       }
 
+      if (!s.cancelled && !failed) {
+        try {
+          await this.persistSession(params.sessionId, s);
+        } catch (error) {
+          // Amp already completed the work; failing the turn could cause a
+          // client retry to duplicate tool side effects. Ownership was saved
+          // at thread initialization; only the activity refresh failed here.
+          console.error('[acp] Amp turn completed, but failed to persist session activity', error);
+        }
+      }
       const usage = turnUsage.toAcp();
       return { stopReason: s.cancelled ? 'cancelled' : 'end_turn', ...(usage ? { usage } : {}) };
     } catch (err) {

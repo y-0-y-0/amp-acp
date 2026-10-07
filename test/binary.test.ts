@@ -111,6 +111,7 @@ describe('Binary integration tests', () => {
     expect(caps.promptCapabilities.embeddedContext).toBe(true);
     expect(caps.mcpCapabilities.http).toBe(true);
     expect(caps.mcpCapabilities.sse).toBe(true);
+    expect(resp.result!.agentCapabilities).toMatchObject({ loadSession: true, sessionCapabilities: { resume: {}, list: {} } });
     const authMethods = resp.result!.authMethods as Array<{
       id: string;
       name: string;

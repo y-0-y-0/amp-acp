@@ -180,21 +180,27 @@ describe('session/load across adapter restarts', () => {
       model: 'high',
       executor: 'local',
       cwd: fixtureDir,
+      updatedAt: expect.any(String),
     });
 
     // Second adapter process, same state dir: load must reattach and replay.
     const second = spawnAdapter();
     try {
       await second.connection.connectWith(streamOf(second.process), async (agent) => {
-        await agent.request(methods.agent.initialize, {
+        const init = await agent.request(methods.agent.initialize, {
           protocolVersion: PROTOCOL_VERSION,
           clientCapabilities: {},
         });
+        expect(init.agentCapabilities.sessionCapabilities?.list).toEqual({});
+        const list = await agent.request(methods.agent.session.list, { cwd: fixtureDir });
+        expect(list.sessions).toEqual([{ sessionId, cwd: fixtureDir, updatedAt: expect.any(String) }]);
+        const other = await agent.request(methods.agent.session.list, { cwd: path.join(fixtureDir, 'other') });
+        expect(other.sessions).toEqual([]);
 
         const loaded = await agent.request(methods.agent.session.load, {
           sessionId,
           cwd: fixtureDir,
-          mcpServers: [],
+          mcpServers: [{ name: 'fresh', command: 'fresh-mcp', args: ['after-restart'], env: [] }],
         });
         const byId = new Map(
           (loaded.configOptions ?? []).map((option) => [option.id, option.currentValue]),
@@ -244,8 +250,10 @@ describe('session/load across adapter restarts', () => {
     const executes = invocations.filter((i) => i.prompt !== null);
     expect(executes).toHaveLength(2);
     const followUp = executes[1]!;
-    expect(followUp.argv).toContain('continue');
-    expect(followUp.argv).toContain(THREAD_ID);
+    expect(followUp.argv.slice(0, 3)).toEqual(['threads', 'continue', THREAD_ID]);
+    const mcpIndex = followUp.argv.indexOf('--mcp-config');
+    expect(mcpIndex).toBeGreaterThanOrEqual(0);
+    expect(JSON.parse(followUp.argv[mcpIndex + 1]!)).toEqual({ fresh: { command: 'fresh-mcp', args: ['after-restart'] } });
     const modeIndex = followUp.argv.indexOf('--mode');
     expect(modeIndex).toBeGreaterThanOrEqual(0);
     expect(followUp.argv[modeIndex + 1]).toBe('high');

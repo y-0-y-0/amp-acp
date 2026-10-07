@@ -165,6 +165,7 @@ describe('AmpAcpAgent with plugin agent modes', () => {
       discoverPluginModes: () => [],
       threadStore: {
         load: async (sessionId) => mappings.get(sessionId) ?? null,
+        list: async () => [...mappings.values()],
         save: async (mapping) => {
           mappings.set(mapping.sessionId, mapping);
         },
